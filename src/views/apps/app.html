@@ -213,18 +213,148 @@
 
 <script src="/assets/js/prism.js"></script>
 <script>
+  const appName = '<%= app.name %>';
+  let currentWs = null;
+  let currentLogType = 'stdout';
+  let isRealtimeMode = true; // 实时模式开关
+  let autoScroll = true; // 自动滚动开关
 
+  // WebSocket 连接管理
+  function connectWebSocket(logType) {
+    // 如果已有连接，先关闭
+    if (currentWs) {
+      currentWs.close();
+      currentWs = null;
+    }
+
+    if (!isRealtimeMode) {
+      return;
+    }
+
+    // 构建 WebSocket URL
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    const wsUrl = `${protocol}//${host}/ws/logs?appName=${encodeURIComponent(appName)}&logType=${encodeURIComponent(logType)}`;
+    
+    currentWs = new WebSocket(wsUrl);
+    currentLogType = logType;
+
+    currentWs.onopen = () => {
+      console.log(`WebSocket 连接已建立: ${logType}`);
+      // 显示连接状态
+      showConnectionStatus(true);
+    };
+
+    currentWs.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        
+        if (message.type === 'connected') {
+          console.log(message.message);
+        } else if (message.type === 'log') {
+          // 追加新日志
+          appendLog(logType, message.data);
+        } else if (message.type === 'pong') {
+          // 心跳响应
+        }
+      } catch (error) {
+        console.error('解析 WebSocket 消息错误:', error);
+      }
+    };
+
+    currentWs.onerror = (error) => {
+      console.error('WebSocket 错误:', error);
+      showConnectionStatus(false);
+    };
+
+    currentWs.onclose = () => {
+      console.log('WebSocket 连接已关闭');
+      showConnectionStatus(false);
+      
+      // 如果仍在实时模式，尝试重连
+      if (isRealtimeMode && currentLogType === logType) {
+        setTimeout(() => {
+          if (isRealtimeMode && currentLogType === logType) {
+            connectWebSocket(logType);
+          }
+        }, 3000);
+      }
+    };
+
+    // 心跳检测
+    const pingInterval = setInterval(() => {
+      if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+        currentWs.send(JSON.stringify({ type: 'ping' }));
+      } else {
+        clearInterval(pingInterval);
+      }
+    }, 30000);
+  }
+
+  // 显示连接状态
+  function showConnectionStatus(connected) {
+    const statusIndicator = document.getElementById('ws-status');
+    if (!statusIndicator) {
+      // 创建状态指示器
+      const nav = document.querySelector('.nav-tabs');
+      if (nav) {
+        const statusEl = document.createElement('span');
+        statusEl.id = 'ws-status';
+        statusEl.className = 'ms-2';
+        statusEl.style.fontSize = '12px';
+        nav.appendChild(statusEl);
+      }
+    }
+    
+    const indicator = document.getElementById('ws-status');
+    if (indicator) {
+      if (connected) {
+        indicator.innerHTML = '<span class="badge bg-green">实时</span>';
+        indicator.title = 'WebSocket 已连接';
+      } else {
+        indicator.innerHTML = '<span class="badge bg-red">断开</span>';
+        indicator.title = 'WebSocket 已断开';
+      }
+    }
+  }
+
+  // 追加日志
+  function appendLog(logType, logData) {
+    const logElement = document.querySelector(`#${logType} code`);
+    if (logElement) {
+      const wasScrolledToBottom = isScrolledToBottom(logElement);
+      
+      logElement.innerHTML += '<br/>' + logData;
+      
+      // 如果之前滚动到底部，保持自动滚动
+      if (wasScrolledToBottom && autoScroll) {
+        scrollToBottom(logElement);
+      }
+    }
+  }
+
+  // 检查是否滚动到底部
+  function isScrolledToBottom(element) {
+    return element.scrollHeight - element.scrollTop <= element.clientHeight + 10;
+  }
+
+  // 滚动到底部
+  function scrollToBottom(element) {
+    element.scrollTop = element.scrollHeight;
+  }
+
+  // 获取活动标签数据
   function getActiveTabData(){
     const data = {
       log_type: $('.tab-pane.active').attr('id'),
       next_key: $('.tab-pane.active').attr('data-next-key')
     };
-    return data
+    return data;
   }
-  
 
+  // 获取日志（用于加载历史日志）
   async function fetchLogs(log_type, next_key){
-    const response = await fetch(`/api/apps/<%= app.name %>/logs/${log_type}${next_key?`?nextKey=${next_key}`: ''}`)
+    const response = await fetch(`/api/apps/${appName}/logs/${log_type}${next_key?`?nextKey=${next_key}`: ''}`)
     const data = await response.json()
     if(data && data.logs){
       return data.logs
@@ -232,22 +362,46 @@
     return null
   }
 
+  // 设置日志数据
   function setLogsData(log_type, logs, action){
     $(`#${log_type}`).attr('data-next-key', logs.nextKey)
     if(action === 'refresh'){
       $(`#${log_type} code`).html(logs.lines)
+      if (autoScroll) {
+        const logElement = document.querySelector(`#${log_type} code`);
+        if (logElement) {
+          scrollToBottom(logElement);
+        }
+      }
     }
     else if(action === 'append'){
       $(`#${log_type} code`).append('<br/>' + logs.lines)
+      if (autoScroll) {
+        const logElement = document.querySelector(`#${log_type} code`);
+        if (logElement) {
+          scrollToBottom(logElement);
+        }
+      }
     }
     else if(action === 'prepend'){
+      const logElement = document.querySelector(`#${log_type} code`);
+      const oldScrollTop = logElement ? logElement.scrollTop : 0;
+      const oldScrollHeight = logElement ? logElement.scrollHeight : 0;
+      
       $(`#${log_type} code`).prepend(logs.lines + '<br/>')
+      
+      // 保持滚动位置
+      if (logElement) {
+        const newScrollHeight = logElement.scrollHeight;
+        logElement.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
+      }
     }
   }
 
+  // 刷新日志（加载最新日志）
   async function refreshLogs(){
     const { log_type } = getActiveTabData()
-    const logs  = await fetchLogs(log_type)
+    const logs = await fetchLogs(log_type)
     if(logs){
       setLogsData(log_type, logs, 'refresh')
     }
@@ -256,13 +410,14 @@
     }
   }
 
+  // 加载更多历史日志
   async function nextLogs(){
-    const { log_type, next_key  } = getActiveTabData()
+    const { log_type, next_key } = getActiveTabData()
     if(parseInt(next_key) < 0){
       console.log('End of Logs')
     }
     else{
-      const logs  = await fetchLogs(log_type, next_key)
+      const logs = await fetchLogs(log_type, next_key)
       if(logs) {
         setLogsData(log_type, logs, 'prepend')
       }
@@ -271,4 +426,98 @@
       }
     }
   }
+
+  // 切换实时模式
+  function toggleRealtimeMode() {
+    isRealtimeMode = !isRealtimeMode;
+    const btn = document.getElementById('toggle-realtime-btn');
+    
+    if (isRealtimeMode) {
+      // 启用实时模式，连接 WebSocket
+      const { log_type } = getActiveTabData();
+      connectWebSocket(log_type);
+      if (btn) {
+        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-radio" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"></path><path d="M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"></path><path d="M12 12m-5 0a5 5 0 1 0 10 0a5 5 0 1 0 -10 0"></path><path d="M12 12l0 .01"></path></svg>';
+        btn.title = '点击关闭实时模式';
+      }
+    } else {
+      // 关闭实时模式，断开 WebSocket
+      if (currentWs) {
+        currentWs.close();
+        currentWs = null;
+      }
+      showConnectionStatus(false);
+      if (btn) {
+        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-radio-off" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"></path><circle cx="12" cy="12" r="2"></circle></svg>';
+        btn.title = '点击开启实时模式';
+      }
+    }
+  }
+
+  // 切换自动滚动
+  function toggleAutoScroll() {
+    autoScroll = !autoScroll;
+    const btn = document.getElementById('toggle-autoscroll-btn');
+    if (btn) {
+      if (autoScroll) {
+        btn.classList.remove('btn-outline');
+        btn.title = '点击关闭自动滚动';
+      } else {
+        btn.classList.add('btn-outline');
+        btn.title = '点击开启自动滚动';
+      }
+    }
+  }
+
+  // 页面加载完成后初始化
+  $(document).ready(function() {
+    // 添加实时模式和自动滚动按钮
+    const navTabs = document.querySelector('.nav-tabs');
+    if (navTabs) {
+      const toggleRealtimeBtn = document.createElement('button');
+      toggleRealtimeBtn.id = 'toggle-realtime-btn';
+      toggleRealtimeBtn.className = 'btn btn-icon shadow-none ms-2';
+      toggleRealtimeBtn.style.border = 'none !important';
+      toggleRealtimeBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-radio" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"></path><path d="M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"></path><path d="M12 12m-5 0a5 5 0 1 0 10 0a5 5 0 1 0 -10 0"></path><path d="M12 12l0 .01"></path></svg>';
+      toggleRealtimeBtn.title = '点击关闭实时模式';
+      toggleRealtimeBtn.onclick = toggleRealtimeMode;
+      
+      const toggleAutoScrollBtn = document.createElement('button');
+      toggleAutoScrollBtn.id = 'toggle-autoscroll-btn';
+      toggleAutoScrollBtn.className = 'btn btn-icon shadow-none';
+      toggleAutoScrollBtn.style.border = 'none !important';
+      toggleAutoScrollBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icon-tabler-arrow-down" width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"></path><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="18 13 12 19 6 13"></polyline></svg>';
+      toggleAutoScrollBtn.title = '点击关闭自动滚动';
+      toggleAutoScrollBtn.onclick = toggleAutoScroll;
+      
+      const lastLi = navTabs.querySelector('li:last-child');
+      if (lastLi) {
+        lastLi.appendChild(toggleRealtimeBtn);
+        lastLi.appendChild(toggleAutoScrollBtn);
+      }
+    }
+
+    // 监听标签切换
+    $('a[data-bs-toggle="tab"]').on('shown.bs.tab', function (e) {
+      const targetTab = $(e.target).attr('href');
+      const logType = targetTab.substring(1); // 移除 # 号
+      
+      // 如果实时模式开启，连接对应的 WebSocket
+      if (isRealtimeMode) {
+        connectWebSocket(logType);
+      }
+    });
+
+    // 初始连接（默认 stdout）
+    if (isRealtimeMode) {
+      connectWebSocket('stdout');
+    }
+
+    // 页面卸载时关闭连接
+    $(window).on('beforeunload', function() {
+      if (currentWs) {
+        currentWs.close();
+      }
+    });
+  });
 </script>
